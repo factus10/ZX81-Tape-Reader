@@ -39,6 +39,7 @@
       "preload.js",
       "app.js",
       "tzx.js",
+      "zx81chars.js",
       "index.html",
       "help.html",
       "README/**/*",

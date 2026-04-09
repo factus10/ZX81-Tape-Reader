@@ -15,6 +15,7 @@ let currentSessionPath = null;
 function setupEditorListeners() {
   editor.getSession().on("change", function () {
     repaintCanvas();
+    scheduleByteUpdate();
   });
 
   editor.getSession().selection.on("changeCursor", function () {
@@ -52,6 +53,7 @@ window.electronAPI.onInputFile(async (inputFile) => {
   }
 
   repaintCanvas();
+  scheduleByteUpdate();
 });
 
 window.electronAPI.onLoadSession((session) => {
@@ -74,6 +76,7 @@ window.electronAPI.onLoadSession((session) => {
   }
 
   repaintCanvas();
+  scheduleByteUpdate();
 });
 
 window.electronAPI.onMenuAction((action) => {
@@ -462,4 +465,84 @@ async function exportDataAsP() {
   const outputFileName =
     (fileName || "untitled").replace(/\.wav$/i, "") + ".p";
   await window.electronAPI.saveFile(rawData, outputFileName, "p");
+}
+
+// --- Byte Panel ---
+
+let currentByteTab = "bytes";
+let byteUpdateTimer = null;
+
+function showByteTab(tab) {
+  currentByteTab = tab;
+  const buttons = document.querySelectorAll("#BytePanelTabs button");
+  buttons.forEach((btn) => btn.classList.remove("active"));
+  if (tab === "bytes") {
+    buttons[0].classList.add("active");
+    document.getElementById("ByteView").style.display = "";
+    document.getElementById("ListingView").style.display = "none";
+  } else {
+    buttons[1].classList.add("active");
+    document.getElementById("ByteView").style.display = "none";
+    document.getElementById("ListingView").style.display = "";
+  }
+  scheduleByteUpdate();
+}
+
+function scheduleByteUpdate() {
+  if (byteUpdateTimer) clearTimeout(byteUpdateTimer);
+  byteUpdateTimer = setTimeout(updateBytePanel, 300);
+}
+
+async function updateBytePanel() {
+  const rawData = getRawData();
+  if (rawData.length === 0) {
+    document.getElementById("ByteView").innerHTML = '<span style="color:#666">No data</span>';
+    document.getElementById("ListingView").innerHTML = '<span style="color:#666">No data</span>';
+    return;
+  }
+
+  const result = await window.electronAPI.decodeZx81Bytes(rawData);
+
+  if (currentByteTab === "bytes" || true) {
+    const byteView = document.getElementById("ByteView");
+    let html = "";
+    for (let i = 0; i < rawData.length; i++) {
+      const hex = rawData[i].toString(16).toUpperCase().padStart(2, "0");
+      const ch = escapeHtml(result.displayChars[i]);
+      const isNL = rawData[i] === 0x76;
+      html +=
+        '<div class="byte-row" data-byte="' + i + '">' +
+        '<span class="byte-offset">' + String(i).padStart(4, " ") + "</span>  " +
+        '<span class="byte-hex">' + hex + "</span>  " +
+        (isNL
+          ? '<span class="byte-newline">NEWLINE</span>'
+          : '<span class="byte-char">' + ch + "</span>") +
+        "</div>";
+    }
+    byteView.innerHTML = html;
+  }
+
+  if (true) {
+    const listingView = document.getElementById("ListingView");
+    if (result.listing.length > 0) {
+      listingView.innerHTML = result.listing
+        .map((line) => {
+          const spaceIdx = line.indexOf(" ");
+          const num = line.substring(0, spaceIdx);
+          const rest = escapeHtml(line.substring(spaceIdx));
+          return '<span class="line-num">' + num + "</span>" + rest;
+        })
+        .join("\n");
+    } else {
+      listingView.innerHTML = '<span style="color:#666">Could not parse as ZX81 BASIC program</span>';
+    }
+  }
+}
+
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }

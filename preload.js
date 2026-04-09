@@ -28,4 +28,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   saveSession: (sessionData, filePath) => {
     return ipcRenderer.invoke("save-session", sessionData, filePath);
   },
+
+  decodeZx81Bytes: (rawData) => {
+    return ipcRenderer.invoke("decode-zx81-bytes", rawData);
+  },
 });

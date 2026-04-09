@@ -284,6 +284,13 @@ ipcMain.handle("encode-to-tzx", (_event, rawData) => {
   return tzx.encode(rawData);
 });
 
+ipcMain.handle("decode-zx81-bytes", (_event, rawData) => {
+  const zx81 = require("./zx81chars");
+  const displayChars = rawData.map((b) => zx81.byteToDisplay(b));
+  const listing = zx81.decodeListing(rawData);
+  return { displayChars, listing };
+});
+
 ipcMain.handle("save-file", async (_event, dataArray, defaultFileName, fileType) => {
   const filters = {
     tzx: [{ name: "TZX Files", extensions: ["tzx"] }],
