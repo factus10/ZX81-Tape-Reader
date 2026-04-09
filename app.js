@@ -197,6 +197,26 @@ positionSlider.addEventListener("input", (e) => {
   manualScroll = false;
 });
 
+document.getElementById("Canvas").addEventListener("click", (e) => {
+  const sampleIdx = Math.floor(canvasOffset + e.offsetX * samplesPerPixel);
+  let bestRow = 0;
+  let bestDist = Infinity;
+  let runDataCache = {};
+  for (let row = 0; row < editor.session.getLength(); row++) {
+    const rd = getRunData(row, runDataCache);
+    if (rd && (rd.bitValue === "0" || rd.bitValue === "1" || rd.bitValue === "?")) {
+      const center = rd.offset + rd.length / 2;
+      const dist = Math.abs(center - sampleIdx);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestRow = row;
+      }
+    }
+  }
+  editor.gotoLine(bestRow + 1, 0, true);
+  editor.focus();
+});
+
 document.getElementById("Canvas").addEventListener(
   "wheel",
   (e) => {

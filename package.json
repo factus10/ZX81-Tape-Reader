@@ -15,8 +15,7 @@
   "dependencies": {
     "almost-equal": "^1.1.0",
     "goertzel": "^3.0.1",
-    "node-wav": "0.0.2",
-    "progress": "^1.1.8"
+    "node-wav": "0.0.2"
   },
   "devDependencies": {
     "electron": "^41.0.0",
