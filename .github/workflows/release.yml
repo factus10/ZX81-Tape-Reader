@@ -17,10 +17,7 @@ jobs:
         include:
           - os: macos-latest
             platform: mac
-            args: --mac --arm64
-          - os: macos-13
-            platform: mac-x64
-            args: --mac --x64
+            args: --mac --arm64 --x64
           - os: windows-latest
             platform: win
             args: --win
