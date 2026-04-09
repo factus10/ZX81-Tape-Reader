@@ -139,8 +139,8 @@ function buildMenu() {
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 2000,
-    height: 600,
+    width: 1200,
+    height: 700,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
