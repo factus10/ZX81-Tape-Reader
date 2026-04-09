@@ -1,0 +1,49 @@
+{
+  "name": "zx81-dat-tape-reader",
+  "version": "1.0.0",
+  "description": "Decode ZX81/TS-2068 tape recordings from WAV files",
+  "main": "index.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "keywords": [],
+  "author": "Martin Vindahl Olsen",
+  "license": "ISC",
+  "dependencies": {
+    "almost-equal": "^1.1.0",
+    "goertzel": "^3.0.1",
+    "node-wav": "0.0.2",
+    "progress": "^1.1.8"
+  },
+  "devDependencies": {
+    "electron": "^41.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.mvindahl.zx81-dat-tape-reader",
+    "productName": "ZX81 Tape Reader",
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    },
+    "files": [
+      "index.js",
+      "preload.js",
+      "app.js",
+      "tzx.js",
+      "index.html",
+      "help.html",
+      "README/**/*",
+      "node_modules/**/*"
+    ]
+  }
+}

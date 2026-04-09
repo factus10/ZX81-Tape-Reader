@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>ZX81 Tape Reader — User Guide</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 24px;
+        color: #222;
+        background: #fafafa;
+        line-height: 1.6;
+      }
+      h1 { font-size: 24px; border-bottom: 1px solid #ccc; padding-bottom: 8px; }
+      h2 { font-size: 18px; margin-top: 32px; color: #333; }
+      h3 { font-size: 15px; margin-top: 24px; color: #444; }
+      code {
+        background: #e8e8e8;
+        padding: 2px 5px;
+        border-radius: 3px;
+        font-size: 13px;
+      }
+      kbd {
+        background: #eee;
+        border: 1px solid #bbb;
+        border-radius: 3px;
+        padding: 1px 5px;
+        font-size: 12px;
+        font-family: inherit;
+      }
+      table {
+        border-collapse: collapse;
+        margin: 12px 0;
+      }
+      th, td {
+        border: 1px solid #ccc;
+        padding: 6px 12px;
+        text-align: left;
+      }
+      th { background: #eee; }
+      img {
+        max-width: 100%;
+        border: 1px solid #ccc;
+        margin: 8px 0;
+      }
+      .shortcut-table td:first-child { white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <h1>ZX81 Tape Reader &mdash; User Guide</h1>
+
+    <h2>Overview</h2>
+    <p>
+      ZX81 Tape Reader decodes audio recordings of ZX81, Lambda 8300, and
+      Timex Sinclair 2068 cassette tapes. It analyzes WAV files for
+      frequency-encoded bit patterns and lets you manually review and correct
+      the results before exporting to .tzx or .p format for use in emulators.
+    </p>
+
+    <h2>Workflow</h2>
+    <ol>
+      <li><strong>Open</strong> a WAV file via <em>File &gt; Open WAV...</em>
+          (<kbd>Cmd+O</kbd>). The tool will analyze the recording for bit patterns.
+          This may take a few seconds depending on file size.</li>
+      <li><strong>Review</strong> the analysis in the editor. Search for
+          <code>?</code> marks to find areas that need manual correction.</li>
+      <li><strong>Save your work</strong> with <em>File &gt; Save Session</em>
+          (<kbd>Cmd+S</kbd>) to create a .ztr session file you can resume later.</li>
+      <li><strong>Export</strong> the final result via <em>File &gt; Export as .tzx...</em>
+          or <em>File &gt; Export as .p...</em></li>
+    </ol>
+
+    <h2>The Editor Window</h2>
+    <img src="README/editor_window.png" alt="Editor window" />
+    <p>The window has three areas:</p>
+    <ul>
+      <li><strong>Waveform canvas</strong> (top) &mdash; shows the original audio waveform
+          and detected frequency bursts. Scroll the waveform by using the mouse
+          wheel over the canvas area. The current editor line is highlighted in blue.</li>
+      <li><strong>Text editor</strong> (middle) &mdash; the decoded bit data in editable
+          text format. Editing the text immediately updates the waveform display.</li>
+      <li><strong>Status bar</strong> (bottom) &mdash; shows the total data length
+          in bytes and remaining bits.</li>
+    </ul>
+
+    <h2>Editor Format</h2>
+    <p>Each line in the editor represents one detected frequency burst:</p>
+    <pre>SYMBOL    OFFSET:LENGTH</pre>
+    <p>For example: <code>0    197441:67</code></p>
+
+    <table>
+      <tr><th>Symbol</th><th>Meaning</th></tr>
+      <tr><td><code>0</code></td><td>Zero bit &mdash; short pulse matching expected zero length</td></tr>
+      <tr><td><code>1</code></td><td>One bit &mdash; longer pulse matching expected one length</td></tr>
+      <tr><td><code>?</code></td><td>Unknown &mdash; pulse length doesn't match either; needs manual review</td></tr>
+      <tr><td><code>-</code></td><td>Noise &mdash; very short burst, automatically ignored</td></tr>
+    </table>
+
+    <p>The <strong>offset</strong> is the sample index where the burst starts,
+       and <strong>length</strong> is the burst duration in samples. Both are optional
+       when editing &mdash; if omitted, they are inferred from the previous line.
+       This is useful when inserting corrected bits.</p>
+
+    <p>Comments can be added after <code>#</code>. The tool automatically adds
+       <code># suspicious loss of signal?</code> where it detects unusually
+       long pauses in the recording.</p>
+
+    <h2>Fixing Problems</h2>
+
+    <h3>Broken bits</h3>
+    <p>When the signal degrades briefly, the analysis may interpret valid pulses
+       as noise (marked with <code>-</code>):</p>
+    <img src="README/broken_bits.png" alt="Broken bits" />
+    <p>Visual inspection shows these should be zeros. Delete the noise lines
+       and insert lines containing just <code>0</code>:</p>
+    <img src="README/broken_bits_fixed.png" alt="Broken bits fixed" />
+
+    <h3>Broken sequences</h3>
+    <p>Longer signal degradation can make multiple bits unreadable:</p>
+    <img src="README/broken_sequence.png" alt="Broken sequence" />
+    <p>The <code># suspicious loss of signal?</code> comments help locate
+       these areas. By examining the waveform ripples, a human can often
+       determine the correct bit sequence:</p>
+    <img src="README/broken_sequence_fixed.png" alt="Broken sequence fixed" />
+
+    <h3>Fully readable tape</h3>
+    <p>Sometimes the tape is in good condition and searching for <code>?</code>
+       yields nothing &mdash; you can export immediately:</p>
+    <img src="README/readable_tape.png" alt="Fully readable tape" />
+
+    <h2>Tips</h2>
+    <ul>
+      <li>Use <kbd>Cmd+F</kbd> to search for <code>?</code> marks and quickly
+          find areas needing attention.</li>
+      <li>Check the byte count in the status bar before exporting. A non-integer
+          number of bytes usually indicates missing or extra bits.</li>
+      <li>When inserting corrected bits, you only need to type the symbol
+          (e.g. <code>0</code> or <code>1</code>). The offset and length
+          will be inferred automatically.</li>
+      <li>Save your session regularly with <kbd>Cmd+S</kbd> &mdash; tape
+          correction can be time-consuming work.</li>
+    </ul>
+
+    <h2>Keyboard Shortcuts</h2>
+    <table class="shortcut-table">
+      <tr><th>Shortcut</th><th>Action</th></tr>
+      <tr><td><kbd>Cmd+O</kbd></td><td>Open WAV file</td></tr>
+      <tr><td><kbd>Cmd+Shift+O</kbd></td><td>Open session file</td></tr>
+      <tr><td><kbd>Cmd+S</kbd></td><td>Save session</td></tr>
+      <tr><td><kbd>Cmd+Shift+S</kbd></td><td>Save session as...</td></tr>
+      <tr><td><kbd>Cmd+F</kbd></td><td>Find in editor</td></tr>
+      <tr><td><kbd>Cmd+Z</kbd></td><td>Undo</td></tr>
+      <tr><td><kbd>Cmd+Shift+Z</kbd></td><td>Redo</td></tr>
+      <tr><td><kbd>F1</kbd></td><td>Open this guide</td></tr>
+    </table>
+
+    <h2>File Formats</h2>
+    <table>
+      <tr><th>Extension</th><th>Description</th></tr>
+      <tr><td><code>.wav</code></td><td>Input audio recording of tape</td></tr>
+      <tr><td><code>.ztr</code></td><td>Session file (JSON) &mdash; saves your work in progress</td></tr>
+      <tr><td><code>.tzx</code></td><td>ZX Spectrum/ZX81 tape image with headers &mdash; for emulators</td></tr>
+      <tr><td><code>.p</code></td><td>Raw ZX81 program file &mdash; direct memory image for emulators</td></tr>
+    </table>
+
+    <h2>How It Works</h2>
+    <p>For each sample in the WAV file, the tool uses a
+       <strong>Goertzel algorithm</strong> to detect 3.2 kHz frequency bursts
+       (the encoding frequency used by the ZX81). Sequences of detected
+       frequencies are collected into runs, and each run's length is compared
+       against the expected lengths for zero and one bits. This frequency-based
+       approach works better than amplitude detection on deteriorated tapes
+       where signal levels vary.</p>
+  </body>
+</html>
