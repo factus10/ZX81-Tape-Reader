@@ -110,7 +110,9 @@ The built app will be in the `dist/` directory.
 
 ## Credits
 
-Originally created by [Martin Vindahl Olsen](https://github.com/mvindahl/zx81-dat-tape-reader). Modernized with updated Electron, secure architecture, session management, ZX81 byte decoding, and BASIC listing reconstruction.
+Forked from [zx81-dat-tape-reader](https://github.com/mvindahl/zx81-dat-tape-reader) by [Martin Vindahl Olsen](https://github.com/mvindahl), who created the original Goertzel-based tape decoding approach and interactive editor.
+
+This fork by [David Anderson](https://github.com/factus10) modernizes the app with Electron 41, secure context isolation, session save/load, ZX81 byte decoding, BASIC listing reconstruction, waveform zoom/pan, and standalone app packaging.
 
 ## License
 

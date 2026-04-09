@@ -10,7 +10,8 @@
     "dist:linux": "electron-builder --linux"
   },
   "keywords": [],
-  "author": "Martin Vindahl Olsen",
+  "author": "David Anderson",
+  "contributors": ["Martin Vindahl Olsen"],
   "license": "ISC",
   "dependencies": {
     "almost-equal": "^1.1.0",
