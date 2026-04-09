@@ -17,9 +17,49 @@
         left: 0;
       }
 
-      #editor {
+      #WavToolbar {
         position: absolute;
         top: 140px;
+        left: 0;
+        right: 0;
+        height: 28px;
+        display: flex;
+        align-items: center;
+        padding: 0 8px;
+        gap: 8px;
+        background: #2a2a2a;
+        border-top: 1px solid #444;
+        border-bottom: 1px solid #444;
+        font-size: 12px;
+        color: #aaa;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      #WavToolbar label {
+        white-space: nowrap;
+      }
+
+      #WavToolbar input[type="range"] {
+        height: 4px;
+        cursor: pointer;
+      }
+
+      #ZoomSlider {
+        width: 100px;
+      }
+
+      #PositionSlider {
+        flex: 1;
+      }
+
+      #ZoomLabel {
+        min-width: 36px;
+        text-align: right;
+      }
+
+      #editor {
+        position: absolute;
+        top: 168px;
         right: 0;
         bottom: 20px;
         left: 0;
@@ -46,6 +86,13 @@
   <body>
     <div id="Container">
       <canvas id="Canvas" height="140"></canvas>
+      <div id="WavToolbar">
+        <label>Zoom:</label>
+        <input type="range" id="ZoomSlider" min="0" max="100" value="50" />
+        <span id="ZoomLabel">1x</span>
+        <label>Position:</label>
+        <input type="range" id="PositionSlider" min="0" max="1000" value="0" />
+      </div>
       <div id="editor"></div>
       <div id="LengthStats">
         Data length: <span id="ByteLen"></span><span id="BitLen"></span>

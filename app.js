@@ -136,18 +136,86 @@ let canvasOffset = 0;
 let canvasWidth;
 let manualScroll = false;
 
+// Zoom: samplesPerPixel controls how many samples each pixel represents.
+// zoom slider 0..100 maps exponentially: 0=32x zoom out, 50=1x, 100=0.125x (8x zoom in)
+let samplesPerPixel = 1;
+
+function zoomSliderToSPP(val) {
+  // exponential: slider 50 = 1 spp, 0 = 32 spp, 100 = 1/8 spp
+  return Math.pow(2, (50 - val) / 10);
+}
+
+function sppToZoomSlider(spp) {
+  return 50 - Math.log2(spp) * 10;
+}
+
+function zoomLabel(spp) {
+  if (spp >= 1) return (1 / spp).toFixed(spp >= 4 ? 2 : 1) + "x";
+  return Math.round(1 / spp) + "x";
+}
+
+function clampOffset() {
+  if (samples) {
+    const visibleSamples = canvasWidth * samplesPerPixel;
+    canvasOffset = Math.max(
+      0,
+      Math.min(canvasOffset, samplesLength - visibleSamples)
+    );
+  }
+}
+
+function updatePositionSlider() {
+  if (!samples) return;
+  const slider = document.getElementById("PositionSlider");
+  const visibleSamples = canvasWidth * samplesPerPixel;
+  const maxOffset = Math.max(0, samplesLength - visibleSamples);
+  slider.value = maxOffset > 0 ? (canvasOffset / maxOffset) * 1000 : 0;
+}
+
+const zoomSlider = document.getElementById("ZoomSlider");
+const positionSlider = document.getElementById("PositionSlider");
+
+zoomSlider.addEventListener("input", (e) => {
+  const centerSample = canvasOffset + (canvasWidth * samplesPerPixel) / 2;
+  samplesPerPixel = zoomSliderToSPP(Number(e.target.value));
+  document.getElementById("ZoomLabel").textContent = zoomLabel(samplesPerPixel);
+  canvasOffset = centerSample - (canvasWidth * samplesPerPixel) / 2;
+  clampOffset();
+  manualScroll = true;
+  repaintCanvas();
+  manualScroll = false;
+});
+
+positionSlider.addEventListener("input", (e) => {
+  if (!samples) return;
+  const visibleSamples = canvasWidth * samplesPerPixel;
+  const maxOffset = Math.max(0, samplesLength - visibleSamples);
+  canvasOffset = (Number(e.target.value) / 1000) * maxOffset;
+  clampOffset();
+  manualScroll = true;
+  repaintCanvas();
+  manualScroll = false;
+});
+
 document.getElementById("Canvas").addEventListener(
   "wheel",
   (e) => {
     e.preventDefault();
-    const scrollAmount = e.deltaX || e.deltaY;
-    canvasOffset += Math.round(scrollAmount * 3);
-    if (samples) {
-      canvasOffset = Math.max(
-        0,
-        Math.min(canvasOffset, samplesLength - canvasWidth)
-      );
+    if (e.ctrlKey || e.metaKey) {
+      // Ctrl/Cmd + scroll = zoom
+      const centerSample = canvasOffset + (canvasWidth * samplesPerPixel) / 2;
+      const zoomDelta = e.deltaY > 0 ? 5 : -5;
+      const newVal = Math.max(0, Math.min(100, Number(zoomSlider.value) - zoomDelta));
+      zoomSlider.value = newVal;
+      samplesPerPixel = zoomSliderToSPP(newVal);
+      document.getElementById("ZoomLabel").textContent = zoomLabel(samplesPerPixel);
+      canvasOffset = centerSample - (canvasWidth * samplesPerPixel) / 2;
+    } else {
+      // Regular scroll = pan
+      const scrollAmount = e.deltaX || e.deltaY;
+      canvasOffset += Math.round(scrollAmount * 3 * samplesPerPixel);
     }
+    clampOffset();
     manualScroll = true;
     repaintCanvas();
     manualScroll = false;
@@ -162,6 +230,8 @@ function repaintCanvas() {
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+  const visibleSamples = canvasWidth * samplesPerPixel;
+
   let runDataCache = {};
   const cursorRow = editor.getSelection().getCursor().row;
   const currentLineRunData = getRunData(cursorRow, runDataCache);
@@ -170,12 +240,9 @@ function repaintCanvas() {
     canvasOffset = Math.floor(
       currentLineRunData.offset +
         currentLineRunData.length / 2 -
-        canvasWidth / 2
+        visibleSamples / 2
     );
-    canvasOffset = Math.max(canvasOffset, 0);
-    if (samples) {
-      canvasOffset = Math.min(canvasOffset, samplesLength - canvasWidth);
-    }
+    clampOffset();
   }
 
   let row = cursorRow;
@@ -205,18 +272,24 @@ function repaintCanvas() {
   }
 
   if (samples) {
-    for (let idx = 0; idx < canvasWidth; idx++) {
-      ctx.moveTo(idx, 50);
-      ctx.lineTo(idx, 50 - 50 * samples[idx + canvasOffset]);
+    ctx.beginPath();
+    for (let px = 0; px < canvasWidth; px++) {
+      const sampleIdx = Math.floor(canvasOffset + px * samplesPerPixel);
+      if (sampleIdx >= 0 && sampleIdx < samplesLength) {
+        ctx.moveTo(px, 50);
+        ctx.lineTo(px, 50 - 50 * samples[sampleIdx]);
+      }
     }
     ctx.stroke();
   }
 
   ctx.font = "10px Lucida Console";
   ctx.fillStyle = "#aaa";
-  ctx.fillRect(0, 0, 80, 12);
+  ctx.fillRect(0, 0, 120, 12);
   ctx.fillStyle = "white";
-  ctx.fillText("offset: " + canvasOffset, 4, 10);
+  ctx.fillText("offset: " + Math.floor(canvasOffset) + "  " + zoomLabel(samplesPerPixel), 4, 10);
+
+  updatePositionSlider();
 
   const bitlen = getBits().length;
 
@@ -297,23 +370,23 @@ function paintRun(ctx, runData, isCursorRow) {
       ctx.fillStyle = "#444";
     }
 
-    if (runData.offset - canvasOffset + runData.length < 0) {
+    const x = (runData.offset - canvasOffset) / samplesPerPixel;
+    const w = runData.length / samplesPerPixel;
+
+    if (x + w < 0) {
       return false;
     }
-    if (runData.offset - canvasOffset > canvasWidth) {
+    if (x > canvasWidth) {
       return false;
     }
 
-    ctx.fillRect(runData.offset - canvasOffset, 100, runData.length, 20);
+    ctx.fillRect(x, 100, Math.max(w, 1), 20);
 
-    ctx.font = "20px Georgia";
-    ctx.fillStyle = "black";
-
-    ctx.fillText(
-      runData.bitValue,
-      Math.floor(runData.offset - canvasOffset + runData.length / 2) - 5,
-      136
-    );
+    if (w > 10) {
+      ctx.font = "20px Georgia";
+      ctx.fillStyle = "black";
+      ctx.fillText(runData.bitValue, Math.floor(x + w / 2) - 5, 136);
+    }
   }
   return true;
 }
