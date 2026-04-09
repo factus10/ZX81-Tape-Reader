@@ -2,7 +2,7 @@
 
 A desktop app for decoding cassette tape recordings from ZX81, Timex Sinclair 2068, and Lambda 8300 computers. Analyzes WAV audio files using Goertzel frequency detection to recover the original program data, with a visual editor for manual correction of degraded signals.
 
-![Editor window](README/editor_window.png)
+![ZX81 Tape Reader](README/screenshot.png)
 
 ## Features
 
@@ -116,4 +116,4 @@ This fork by [David Anderson](https://github.com/factus10) modernizes the app wi
 
 ## License
 
-ISC
+[GPL-3.0](LICENSE)
