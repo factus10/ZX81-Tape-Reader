@@ -1,7 +1,7 @@
 {
   "name": "zx81-dat-tape-reader",
   "version": "1.0.0",
-  "description": "Decode ZX81/TS-2068 tape recordings from WAV files",
+  "description": "Decode ZX81/TS1000 tape recordings from WAV files",
   "main": "index.js",
   "scripts": {
     "start": "electron .",
@@ -14,8 +14,6 @@
   "contributors": ["Martin Vindahl Olsen"],
   "license": "GPL-3.0",
   "dependencies": {
-    "almost-equal": "^1.1.0",
-    "goertzel": "^3.0.1",
     "node-wav": "0.0.2"
   },
   "devDependencies": {
@@ -40,6 +38,7 @@
       "preload.js",
       "app.js",
       "tzx.js",
+      "decoder.js",
       "zx81chars.js",
       "index.html",
       "help.html",
