@@ -1,14 +1,16 @@
-// ZX81/TS1000 tape decoder using hysteresis-based half-period detection.
+// ZX81/TS1000 tape decoder using amplitude-filtered zero-crossing detection.
 //
-// ZX81 tape format encodes bits as pairs of half-periods:
-//   1-bit: ~4 short half-periods (~150µs each at standard speed)
-//   0-bit: ~8-9 short half-periods
-// At 44100 Hz, short half-periods are ~7 samples, long are ~19 samples.
+// ZX81 tape format encodes bits as bursts of carrier pulses (~3250 Hz):
+//   0-bit: ~4 carrier cycles (fewer pulses)
+//   1-bit: ~9 carrier cycles (more pulses)
+// At 44100 Hz, one carrier half-period is ~7 samples.
 //
-// This decoder uses a Schmitt trigger (hysteresis) approach instead of
-// zero-crossing detection, which is much more robust against:
-//   - Sinusoidal waveforms (azimuth misalignment / head rolloff)
-//   - Noise near zero crossings
+// This decoder uses zero-crossing detection with an amplitude filter
+// that requires the signal to reach 10% of local peak between crossings.
+// This is robust against:
+//   - Asymmetric waveforms where one polarity doesn't reach fixed thresholds
+//   - Amplitude variations across the recording (no AGC needed)
+//   - Noise near zero crossings (filtered by amplitude requirement)
 //   - DC offset drift
 
 const fs = require("fs");
@@ -45,154 +47,182 @@ function processWavFile(filePath) {
   }
 
   // --- F. Signal start detection ---
-  // Scan in 10ms windows for first window where peak > noise floor
-  const winSize = Math.floor(sampleRate * 0.01);
+  // Scan for sustained carrier signal (not just noise spikes).
+  // Require multiple consecutive windows above 25% peak amplitude.
+  const winSize = Math.floor(sampleRate * 0.01); // 10ms windows
   let peakAmplitude = 0;
   for (let i = 0; i < samples.length; i++) {
     if (Math.abs(samples[i]) > peakAmplitude) peakAmplitude = Math.abs(samples[i]);
   }
-  const noiseFloor = peakAmplitude * 0.1;
+  const signalThreshold = peakAmplitude * 0.25;
   let signalStart = 0;
+  let consecutiveAbove = 0;
+  const requiredConsecutive = 3; // 30ms of sustained signal
   for (let i = 0; i < samples.length - winSize; i += winSize) {
     let maxInWin = 0;
     for (let j = i; j < i + winSize; j++) {
       if (Math.abs(samples[j]) > maxInWin) maxInWin = Math.abs(samples[j]);
     }
-    if (maxInWin > noiseFloor) {
-      signalStart = i;
-      break;
+    if (maxInWin > signalThreshold) {
+      consecutiveAbove++;
+      if (consecutiveAbove >= requiredConsecutive) {
+        signalStart = i - (requiredConsecutive - 1) * winSize;
+        break;
+      }
+    } else {
+      consecutiveAbove = 0;
     }
   }
   console.log("signal starts at sample:", signalStart,
     "(" + (signalStart / sampleRate).toFixed(2) + "s)");
   console.log("peak amplitude:", peakAmplitude.toFixed(3));
 
-  // --- B. Hysteresis (Schmitt trigger) transition detection ---
-  const hiThresh = peakAmplitude * 0.3;
-  const loThresh = -peakAmplitude * 0.3;
+  // --- B. Amplitude-filtered zero-crossing detection ---
+  // More robust than hysteresis for signals with asymmetric waveforms or
+  // declining amplitude. Counts all carrier cycles by detecting zero crossings
+  // where the signal has reached significant amplitude since the last crossing.
 
-  // --- C. Half-period measurement ---
-  let state = 0; // 0=low, 1=high
-  let lastTransition = signalStart;
-  let halfPeriods = []; // {index, length}
+  // Cache local peak amplitude in 500-sample windows for performance
+  const peakCacheStep = 100;
+  const peakCacheWindow = 250; // look ±250 samples
+  const peakCache = new Float32Array(
+    Math.ceil(samples.length / peakCacheStep)
+  );
+  for (let i = 0; i < peakCache.length; i++) {
+    const start = Math.max(0, i * peakCacheStep - peakCacheWindow);
+    const end = Math.min(
+      samples.length,
+      i * peakCacheStep + peakCacheStep + peakCacheWindow
+    );
+    let mx = 0;
+    for (let j = start; j < end; j++) {
+      if (Math.abs(samples[j]) > mx) mx = Math.abs(samples[j]);
+    }
+    peakCache[i] = mx;
+  }
 
-  for (let i = signalStart; i < samples.length; i++) {
-    if (state === 0 && samples[i] > hiThresh) {
-      const hp = i - lastTransition;
-      // --- D. Noise gate ---
-      if (hp >= 4) {
-        halfPeriods.push({ index: lastTransition, length: hp });
+  // Find zero crossings with amplitude filter
+  const minAmpFraction = 0.1; // require 10% of local peak between crossings
+  const crossings = [];
+  let lastSign = samples[signalStart] > 0 ? 1 : -1;
+  let maxSinceLast = 0;
+
+  for (let i = signalStart + 1; i < samples.length; i++) {
+    if (Math.abs(samples[i]) > maxSinceLast) maxSinceLast = Math.abs(samples[i]);
+    const sign = samples[i] > 0 ? 1 : -1;
+    if (sign !== lastSign) {
+      const ci = Math.min(
+        Math.floor(i / peakCacheStep),
+        peakCache.length - 1
+      );
+      if (maxSinceLast > peakCache[ci] * minAmpFraction) {
+        crossings.push(i);
+        maxSinceLast = 0;
       }
-      lastTransition = i;
-      state = 1;
-    } else if (state === 1 && samples[i] < loThresh) {
-      const hp = i - lastTransition;
-      if (hp >= 4) {
-        halfPeriods.push({ index: lastTransition, length: hp });
-      }
-      lastTransition = i;
-      state = 0;
+      lastSign = sign;
     }
   }
 
-  console.log("total half-periods detected:", halfPeriods.length);
+  console.log("total zero crossings:", crossings.length);
 
-  // --- E. Adaptive threshold ---
-  // Build histogram of half-period lengths in the data range (4-30 samples),
-  // find the valley between the two peaks (short=1-bit, long=0-bit).
-  const hist = new Array(50).fill(0);
-  const calibrationCount = Math.min(5000, halfPeriods.length);
+  // --- C. Carrier interval measurement ---
+  const intervals = [];
+  for (let i = 1; i < crossings.length; i++) {
+    intervals.push({
+      index: crossings[i - 1],
+      length: crossings[i] - crossings[i - 1],
+    });
+  }
+
+  // --- E. Adaptive threshold for carrier vs gap intervals ---
+  // Build histogram of interval lengths to find the carrier peak
+  const hist = new Array(80).fill(0);
+  const calibrationCount = Math.min(20000, intervals.length);
   for (let i = 0; i < calibrationCount; i++) {
-    const len = halfPeriods[i].length;
-    if (len >= 4 && len < 50) hist[len]++;
+    const len = intervals[i].length;
+    if (len >= 3 && len < 80) hist[len]++;
   }
 
-  // Find the minimum count in the range between the two peaks
-  // First, find the short-pulse peak (should be in 4-12 range)
-  let shortPeak = 4;
+  // Find the carrier peak (short intervals, typically 4-10 range)
+  let carrierPeak = 4;
   for (let i = 4; i <= 12; i++) {
-    if (hist[i] > hist[shortPeak]) shortPeak = i;
+    if (hist[i] > hist[carrierPeak]) carrierPeak = i;
   }
-  // Then find the long-pulse peak (should be in 14-30 range)
-  let longPeak = 14;
-  for (let i = 14; i <= 30; i++) {
-    if (hist[i] > hist[longPeak]) longPeak = i;
-  }
-  // Find the valley between them
-  let threshold = Math.floor((shortPeak + longPeak) / 2); // fallback: midpoint
+
+  // Find carrierMax: the valley between carrier intervals and gap intervals
+  // Look for the first minimum after the carrier peak
+  let carrierMax = carrierPeak + 3; // fallback
   let minCount = Infinity;
-  for (let i = shortPeak + 1; i < longPeak; i++) {
-    if (hist[i] < minCount) {
+  for (let i = carrierPeak + 1; i <= carrierPeak + 8; i++) {
+    if (i < 80 && hist[i] < minCount) {
       minCount = hist[i];
-      threshold = i;
+      carrierMax = i;
     }
   }
-  // Use midpoint of the valley region for robustness
-  threshold += 0.5;
 
-  console.log("adaptive threshold:", threshold.toFixed(1), "samples");
-  console.log("  short peak at:", shortPeak, "  long peak at:", longPeak);
+  console.log("carrier peak at:", carrierPeak, "samples");
+  console.log("carrier max threshold:", carrierMax, "samples");
 
-  // --- G. Bit classification ---
-  // ZX81 tape format: each bit is a burst of short half-periods (carrier pulses)
-  // separated by gaps (long half-periods or silence).
-  //   1-bit: ~4 short half-periods (fewer pulses)
-  //   0-bit: ~9 short half-periods (more pulses)
+  // --- G. Burst grouping by carrier intervals ---
+  // ZX81 tape format: each bit is a burst of carrier cycles separated by gaps.
+  //   0-bit: ~4 carrier cycles (fewer pulses)
+  //   1-bit: ~9 carrier cycles (more pulses)
   //
-  // The long half-periods between bursts are inter-bit gaps, not data.
-  // Strategy: group consecutive short HPs into bursts, then classify by count.
+  // Group consecutive carrier-frequency intervals into bursts,
+  // then classify by cycle count.
 
-  // Group short half-periods into bursts separated by non-short HPs
   let bursts = [];
   let burstStart = -1;
   let burstSampleStart = 0;
-  let burstHPs = 0;
+  let burstIntervals = 0;
   let burstSampleEnd = 0;
 
-  for (let j = 0; j < halfPeriods.length; j++) {
-    const hp = halfPeriods[j];
-    const isShort = hp.length >= 4 && hp.length <= threshold;
+  for (let j = 0; j < intervals.length; j++) {
+    const iv = intervals[j];
+    const isCarrier = iv.length >= 3 && iv.length <= carrierMax;
 
-    if (isShort) {
+    if (isCarrier) {
       if (burstStart === -1) {
         burstStart = j;
-        burstSampleStart = hp.index;
-        burstHPs = 1;
+        burstSampleStart = iv.index;
+        burstIntervals = 1;
       } else {
-        burstHPs++;
+        burstIntervals++;
       }
-      burstSampleEnd = hp.index + hp.length;
+      burstSampleEnd = iv.index + iv.length;
     } else {
-      if (burstStart !== -1) {
+      if (burstStart !== -1 && burstIntervals >= 3) {
+        const cycles = Math.round((burstIntervals + 1) / 2);
         bursts.push({
           index: burstSampleStart,
           runLength: burstSampleEnd - burstSampleStart,
-          halfPeriodCount: burstHPs,
+          halfPeriodCount: cycles, // store cycle count for compatibility
         });
-        burstStart = -1;
-        burstHPs = 0;
       }
-      // Track non-data (sync/pilot) for display
-      if (hp.length > 40) {
+      burstStart = -1;
+      burstIntervals = 0;
+
+      // Track non-data gaps for display
+      if (iv.length > carrierMax * 4) {
         bursts.push({
-          index: hp.index,
-          runLength: hp.length,
+          index: iv.index,
+          runLength: iv.length,
           halfPeriodCount: 0,
           isSync: true,
         });
       }
     }
   }
-  if (burstStart !== -1) {
+  if (burstStart !== -1 && burstIntervals >= 3) {
+    const cycles = Math.round((burstIntervals + 1) / 2);
     bursts.push({
       index: burstSampleStart,
       runLength: burstSampleEnd - burstSampleStart,
-      halfPeriodCount: burstHPs,
+      halfPeriodCount: cycles,
     });
   }
 
-  // Find the threshold between 1-bit HP counts and 0-bit HP counts
-  // using histogram of burst sizes
+  // Find the threshold between 0-bit cycle counts and 1-bit cycle counts
   const burstHist = new Array(30).fill(0);
   for (const b of bursts) {
     if (!b.isSync && b.halfPeriodCount >= 2 && b.halfPeriodCount < 30) {
@@ -200,45 +230,50 @@ function processWavFile(filePath) {
     }
   }
 
-  console.log("burst size histogram:");
+  console.log("burst cycle count histogram:");
   for (let k = 2; k < 20; k++) {
     if (burstHist[k] > 0)
-      console.log("  " + k + " HPs: " + burstHist[k]);
+      console.log("  " + k + " cycles: " + burstHist[k]);
   }
 
-  // Find the valley between the two clusters
-  // First peak should be around 2-4 (1-bits), second around 5-9 (0-bits)
-  let peak1 = 2, peak2 = 6;
-  for (let k = 2; k <= 5; k++) {
+  // Find two peaks: 0-bit peak (fewer cycles) and 1-bit peak (more cycles)
+  let peak0 = 3, peak1 = 8;
+  for (let k = 3; k <= 7; k++) {
+    if (burstHist[k] > burstHist[peak0]) peak0 = k;
+  }
+  for (let k = 7; k <= 15; k++) {
     if (burstHist[k] > burstHist[peak1]) peak1 = k;
   }
-  for (let k = 5; k <= 12; k++) {
-    if (burstHist[k] > burstHist[peak2]) peak2 = k;
-  }
 
-  let bitThreshold = Math.floor((peak1 + peak2) / 2) + 0.5;
+  let bitThreshold = Math.floor((peak0 + peak1) / 2) + 0.5;
   // Find actual valley
   let minVal = Infinity;
-  for (let k = peak1 + 1; k < peak2; k++) {
+  for (let k = peak0 + 1; k < peak1; k++) {
     if (burstHist[k] < minVal) {
       minVal = burstHist[k];
       bitThreshold = k + 0.5;
     }
   }
 
-  console.log("bit threshold:", bitThreshold, "HPs (peak1=" + peak1 + ", peak2=" + peak2 + ")");
+  console.log(
+    "bit threshold:",
+    bitThreshold,
+    "cycles (0-bit peak=" + peak0 + ", 1-bit peak=" + peak1 + ")"
+  );
 
   const runs = bursts;
 
   // Approximate run lengths for waveform display
-  const oneBitRunLength = Math.round(shortPeak * 2 * peak1);
-  const zeroBitRunLength = Math.round(shortPeak * 2 * peak2);
-  const silenceRunLength = Math.round(longPeak * 2);
+  const carrierPeriod = carrierPeak * 2;
+  const zeroBitRunLength = Math.round(carrierPeriod * peak0);
+  const oneBitRunLength = Math.round(carrierPeriod * peak1);
+  const silenceRunLength = Math.round(carrierMax * 4);
 
-  console.log("one bit run length:", oneBitRunLength);
   console.log("zero bit run length:", zeroBitRunLength);
+  console.log("one bit run length:", oneBitRunLength);
 
   // Build editor lines
+  // ZX81 format: fewer cycles = 0-bit, more cycles = 1-bit
   const linesForEdit = runs.map((run) => {
     let bitAsString;
     if (run.isSync) {
@@ -246,9 +281,9 @@ function processWavFile(filePath) {
     } else if (run.halfPeriodCount < 2) {
       bitAsString = "-";
     } else if (run.halfPeriodCount <= bitThreshold) {
-      bitAsString = "1";
-    } else {
       bitAsString = "0";
+    } else {
+      bitAsString = "1";
     }
     return bitAsString + "\t" + run.index + ":" + run.runLength;
   });
