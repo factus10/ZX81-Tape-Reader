@@ -1,12 +1,15 @@
 # ZX81 Tape Reader
 
-A desktop app for decoding cassette tape recordings from ZX81, Timex Sinclair 2068, and Lambda 8300 computers. Analyzes WAV audio files using Goertzel frequency detection to recover the original program data, with a visual editor for manual correction of degraded signals.
+A desktop app for decoding cassette tape recordings from Sinclair ZX81 and Timex/Sinclair 1000 computers. Analyzes WAV audio files using hysteresis-based half-period detection to recover the original program data, with a visual editor for manual correction of degraded signals.
 
 ![ZX81 Tape Reader](README/screenshot.png)
 
 ## Features
 
-- **Frequency-based decoding** using the Goertzel algorithm to detect 3.2 kHz signal bursts, which works better than amplitude detection on deteriorated tapes
+- **Hysteresis-based decoding** using a Schmitt trigger approach to detect signal transitions, which is robust against sinusoidal waveforms, noise near zero crossings, and azimuth misalignment
+- **Adaptive thresholds** that automatically calibrate to each recording's characteristics — no hardcoded frequencies or pulse widths
+- **DC offset removal** via rolling window mean subtraction
+- **Automatic signal detection** that finds where data starts without requiring a pilot tone
 - **Visual waveform display** with zoom (Ctrl+scroll or slider) and pan (scroll or position slider) for inspecting the original audio
 - **Interactive bit editor** where detected pulses are shown as 0s, 1s, or ?s for manual review and correction
 - **Click-to-navigate** between waveform and editor: click a spot on the waveform to jump to the corresponding bit
@@ -54,10 +57,10 @@ The editor shows detected bits as text lines. Each line has a symbol, sample off
 
 | Symbol | Meaning |
 |--------|---------|
-| `0` | Zero bit (short pulse) |
-| `1` | One bit (long pulse) |
-| `?` | Unknown pulse length; needs manual review |
-| `-` | Noise (very short burst, ignored) |
+| `0` | Zero bit (larger pulse burst) |
+| `1` | One bit (smaller pulse burst) |
+| `?` | Unrecognized pulse; needs manual review |
+| `-` | Noise or sync pulse, ignored |
 
 Use **Cmd+F** to search for `?` marks and review them against the waveform. Lines marked with `# suspicious loss of signal?` indicate gaps where the signal may have degraded.
 
@@ -71,7 +74,7 @@ Use **File > Save Session** (Cmd+S) to save progress as a .ztr session file that
 
 ### 4. Export
 
-- **File > Export as .tzx...** for use in ZX81/Spectrum emulators
+- **File > Export as .tzx...** for use in ZX81 emulators
 - **File > Export as .p...** for the raw ZX81 program file
 
 Check the byte count in the status bar before exporting. A non-integer number of bytes usually indicates missing or extra bits.
@@ -92,9 +95,15 @@ Check the byte count in the status bar before exporting. A non-integer number of
 
 ## How it works
 
-For each sample in the WAV file, the surrounding slice of samples is analyzed using a [Goertzel algorithm](https://en.wikipedia.org/wiki/Goertzel_algorithm) to detect 3.2 kHz frequencies. Sequences of detected frequencies are collected into runs, and each run's length is compared against the expected lengths for zero and one bit pulses.
+The decoder uses a [Schmitt trigger](https://en.wikipedia.org/wiki/Schmitt_trigger) (hysteresis) approach instead of zero-crossing or amplitude detection:
 
-This frequency-based approach works better than amplitude detection on deteriorated tapes where signal levels vary across the recording.
+1. **DC offset removal** — subtracts a rolling 100ms window mean to correct bias
+2. **Hysteresis transition detection** — uses ±30% of peak amplitude as high/low thresholds, eliminating false transitions from noise near zero
+3. **Half-period measurement** — measures the time between consecutive transitions
+4. **Adaptive calibration** — builds a histogram of half-period lengths and finds the valley between the short-pulse (1-bit) and long-pulse (0-bit) clusters
+5. **Burst grouping** — groups consecutive short half-periods into bursts, then classifies each burst by its half-period count to determine the bit value
+
+This approach is significantly more robust than amplitude or zero-crossing detection on deteriorated tapes where the signal is sinusoidal (from azimuth misalignment or head rolloff), has no pilot tone, or has high noise near zero crossings.
 
 ## Building
 
@@ -110,9 +119,9 @@ The built app will be in the `dist/` directory.
 
 ## Credits
 
-Forked from [zx81-dat-tape-reader](https://github.com/mvindahl/zx81-dat-tape-reader) by [Martin Vindahl Olsen](https://github.com/mvindahl), who created the original Goertzel-based tape decoding approach and interactive editor.
+Forked from [zx81-dat-tape-reader](https://github.com/mvindahl/zx81-dat-tape-reader) by [Martin Vindahl Olsen](https://github.com/mvindahl), who created the original tape decoding approach and interactive editor.
 
-This fork by [David Anderson](https://github.com/factus10) modernizes the app with Electron 41, secure context isolation, session save/load, ZX81 byte decoding, BASIC listing reconstruction, waveform zoom/pan, and standalone app packaging.
+This fork by [David Anderson](https://github.com/factus10) replaces the decoder with a hysteresis-based approach for ZX81/TS1000 tapes, modernizes the app with Electron 41 and secure context isolation, and adds session save/load, ZX81 byte decoding, BASIC listing reconstruction, waveform zoom/pan, and standalone app packaging.
 
 ## License
 
