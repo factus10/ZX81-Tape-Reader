@@ -13,8 +13,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("menuAction", (_event, action) => callback(action));
   },
 
-  processWavFile: (filePath) => {
-    return ipcRenderer.invoke("process-wav-file", filePath);
+  processWavFile: (filePath, options) => {
+    return ipcRenderer.invoke("process-wav-file", filePath, options);
+  },
+
+  redecodeWavFile: (filePath, options) => {
+    return ipcRenderer.invoke("redecode-wav-file", filePath, options);
   },
 
   encodeToTzx: (rawData) => {

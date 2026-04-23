@@ -59,9 +59,71 @@
         text-align: right;
       }
 
-      #MainArea {
+      #TuningToolbar {
         position: absolute;
         top: 168px;
+        left: 0;
+        right: 0;
+        height: 28px;
+        display: flex;
+        align-items: center;
+        padding: 0 8px;
+        gap: 10px;
+        background: #242424;
+        border-bottom: 1px solid #444;
+        font-size: 11px;
+        color: #aaa;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      #TuningToolbar label {
+        white-space: nowrap;
+      }
+
+      #TuningToolbar select,
+      #TuningToolbar button {
+        background: #333;
+        color: #ddd;
+        border: 1px solid #555;
+        padding: 2px 6px;
+        font-size: 11px;
+        font-family: inherit;
+        cursor: pointer;
+        border-radius: 3px;
+      }
+
+      #TuningToolbar button:hover,
+      #TuningToolbar select:hover {
+        background: #3a3a3a;
+      }
+
+      #TuningToolbar input[type="range"] {
+        width: 90px;
+        height: 4px;
+        cursor: pointer;
+      }
+
+      #TuningToolbar .value {
+        color: #888;
+        min-width: 30px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #TuningToolbar .sep {
+        width: 1px;
+        height: 18px;
+        background: #444;
+        margin: 0 2px;
+      }
+
+      #TuningToolbar .dirty {
+        color: #c97;
+      }
+
+      #MainArea {
+        position: absolute;
+        top: 196px;
         right: 0;
         bottom: 20px;
         left: 0;
@@ -163,6 +225,30 @@
         <span id="ZoomLabel">1x</span>
         <label>Position:</label>
         <input type="range" id="PositionSlider" min="0" max="1000" value="0" />
+      </div>
+      <div id="TuningToolbar">
+        <label>Method:</label>
+        <select id="MethodSelect">
+          <option value="peak">Peak (recommended)</option>
+          <option value="edge">Edge (degraded tapes)</option>
+        </select>
+        <div class="sep"></div>
+        <label>Volume:</label>
+        <input type="range" id="VolumeSlider" min="-50" max="50" value="0" />
+        <span class="value" id="VolumeLabel">1.00×</span>
+        <div class="sep"></div>
+        <label>Bias:</label>
+        <input type="range" id="BiasSlider" min="-50" max="50" value="0" />
+        <span class="value" id="BiasLabel">0.00</span>
+        <div class="sep"></div>
+        <label>Threshold:</label>
+        <input type="range" id="ThresholdSlider" min="10" max="90" value="50" />
+        <span class="value" id="ThresholdLabel">50%</span>
+        <div class="sep"></div>
+        <button id="PolarityButton" title="Flip signal polarity (swap which half is processed)">Polarity: +</button>
+        <div class="sep"></div>
+        <button id="TuningResetButton">Reset</button>
+        <span id="TuningStatus" class="value"></span>
       </div>
       <div id="MainArea">
         <div id="editor"></div>

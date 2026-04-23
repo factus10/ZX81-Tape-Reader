@@ -12,6 +12,16 @@ let silenceRunLength;
 let fileName;
 let currentSessionPath = null;
 
+// Decoder tuning options, mirrored from the TuningToolbar controls.
+const DEFAULT_TUNING = {
+  method: "peak",
+  volume: 1.0,
+  bias: 0.0,
+  polarity: "pos",
+  threshold: 0.5,
+};
+let tuning = { ...DEFAULT_TUNING };
+
 function setupEditorListeners() {
   editor.getSession().on("change", function () {
     repaintCanvas();
@@ -34,27 +44,34 @@ window.electronAPI.onInputFile(async (inputFile) => {
   console.log(inputFile);
   fileName = inputFile;
   currentSessionPath = null;
+  tuning = { ...DEFAULT_TUNING };
+  syncTuningControls();
 
-  const result = await window.electronAPI.processWavFile(inputFile);
-
-  samples = new Float32Array(result.samples);
-  samplesLength = result.samplesLength;
-  zeroBitRunLength = result.zeroBitRunLength;
-  oneBitRunLength = result.oneBitRunLength;
-  silenceRunLength = result.silenceRunLength;
-
+  const result = await window.electronAPI.processWavFile(inputFile, tuning);
+  applyDecodeResult(result, { setEditorContent: true });
   document.title = "ZX81 Tape Reader — " + fileName;
-
-  editor.setValue(result.linesForEdit.join("\n"), -1);
 
   if (!listenersAttached) {
     setupEditorListeners();
     listenersAttached = true;
   }
+});
 
+let peakAmplitude = 1.0;
+
+function applyDecodeResult(result, opts) {
+  samples = new Float32Array(result.samples);
+  samplesLength = result.samplesLength;
+  zeroBitRunLength = result.zeroBitRunLength;
+  oneBitRunLength = result.oneBitRunLength;
+  silenceRunLength = result.silenceRunLength;
+  peakAmplitude = result.peakAmplitude || 1.0;
+  if (opts && opts.setEditorContent) {
+    editor.setValue(result.linesForEdit.join("\n"), -1);
+  }
   repaintCanvas();
   scheduleByteUpdate();
-});
+}
 
 window.electronAPI.onLoadSession((session) => {
   console.log("Loading session:", session._filePath);
@@ -63,6 +80,8 @@ window.electronAPI.onLoadSession((session) => {
   zeroBitRunLength = session.zeroBitRunLength;
   oneBitRunLength = session.oneBitRunLength;
   silenceRunLength = session.silenceRunLength;
+  tuning = { ...DEFAULT_TUNING, ...(session.tuning || {}) };
+  syncTuningControls();
   samples = null;
   samplesLength = 0;
 
@@ -106,6 +125,7 @@ async function saveSession() {
     zeroBitRunLength: zeroBitRunLength,
     oneBitRunLength: oneBitRunLength,
     silenceRunLength: silenceRunLength,
+    tuning: { ...tuning },
   };
   const savedPath = await window.electronAPI.saveSession(
     sessionData,
@@ -125,6 +145,7 @@ async function saveSessionAs() {
     zeroBitRunLength: zeroBitRunLength,
     oneBitRunLength: oneBitRunLength,
     silenceRunLength: silenceRunLength,
+    tuning: { ...tuning },
   };
   const savedPath = await window.electronAPI.saveSession(sessionData, null);
   if (savedPath) {
@@ -304,6 +325,29 @@ function repaintCanvas() {
       }
     }
     ctx.stroke();
+  }
+
+  // Threshold line (peak method only). Shows approximately where the
+  // detection threshold sits relative to the waveform.
+  if (samples && tuning.method === "peak" && peakAmplitude > 0) {
+    // Effective threshold in sample units; remember conditioning is applied
+    // before thresholding in the decoder, so this is an approximation.
+    const thresholdLevel = tuning.threshold * peakAmplitude;
+    // Polarity: threshold sits on the positive side by default; if the user
+    // flipped polarity, draw on the negative side to match what's actually
+    // being detected.
+    const sign = tuning.polarity === "neg" ? -1 : 1;
+    const y = 50 - 50 * sign * thresholdLevel;
+    ctx.strokeStyle = "#4c8";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(canvasWidth, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = "black";
+    ctx.lineWidth = 1;
   }
 
   ctx.font = "10px Lucida Console";
@@ -546,3 +590,129 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
+
+// --- Tuning Toolbar ---
+// The tuning controls let the user manually adjust decoder input conditioning
+// and detection method. Sliders debounce and trigger a re-decode in the main
+// process. This borrows the UX idea (threshold line + gain/bias) from the
+// EightyOne emulator's WAV loader.
+
+const methodSelect = document.getElementById("MethodSelect");
+const volumeSlider = document.getElementById("VolumeSlider");
+const biasSlider = document.getElementById("BiasSlider");
+const thresholdSlider = document.getElementById("ThresholdSlider");
+const polarityButton = document.getElementById("PolarityButton");
+const resetButton = document.getElementById("TuningResetButton");
+const volumeLabel = document.getElementById("VolumeLabel");
+const biasLabel = document.getElementById("BiasLabel");
+const thresholdLabel = document.getElementById("ThresholdLabel");
+const tuningStatus = document.getElementById("TuningStatus");
+
+// Slider 0..±50 maps exponentially so the midpoint is 1× / 0.
+function volumeFromSlider(v) {
+  return Math.pow(2, v / 25); // -50→0.25x, 0→1x, +50→4x
+}
+function volumeToSlider(vol) {
+  return Math.round(Math.log2(vol) * 25);
+}
+function biasFromSlider(v) {
+  return v / 100; // -50→-0.5, 0→0, +50→+0.5
+}
+function biasToSlider(b) {
+  return Math.round(b * 100);
+}
+function thresholdFromSlider(v) {
+  return v / 100; // 10→0.10, 90→0.90
+}
+function thresholdToSlider(t) {
+  return Math.round(t * 100);
+}
+
+function syncTuningControls() {
+  methodSelect.value = tuning.method;
+  volumeSlider.value = volumeToSlider(tuning.volume);
+  biasSlider.value = biasToSlider(tuning.bias);
+  thresholdSlider.value = thresholdToSlider(tuning.threshold);
+  polarityButton.textContent = "Polarity: " + (tuning.polarity === "pos" ? "+" : "−");
+  volumeLabel.textContent = tuning.volume.toFixed(2) + "×";
+  biasLabel.textContent = (tuning.bias >= 0 ? "+" : "") + tuning.bias.toFixed(2);
+  thresholdLabel.textContent = Math.round(tuning.threshold * 100) + "%";
+  const dirty = JSON.stringify(tuning) !== JSON.stringify(DEFAULT_TUNING);
+  resetButton.disabled = !dirty;
+  // Threshold slider is only meaningful for peak method.
+  thresholdSlider.disabled = tuning.method !== "peak";
+}
+
+let redecodeTimer = null;
+let redecodeInFlight = false;
+
+function scheduleRedecode() {
+  if (redecodeTimer) clearTimeout(redecodeTimer);
+  tuningStatus.textContent = "tuning…";
+  tuningStatus.classList.add("dirty");
+  redecodeTimer = setTimeout(runRedecode, 250);
+}
+
+async function runRedecode() {
+  if (!fileName) return;
+  if (redecodeInFlight) {
+    // If one is already running, the debounce will re-fire when it's done.
+    scheduleRedecode();
+    return;
+  }
+  redecodeInFlight = true;
+  tuningStatus.textContent = "decoding…";
+  try {
+    const result = await window.electronAPI.redecodeWavFile(fileName, tuning);
+    applyDecodeResult(result, { setEditorContent: true });
+    tuningStatus.textContent = "";
+    tuningStatus.classList.remove("dirty");
+  } catch (err) {
+    console.error("Re-decode failed:", err);
+    tuningStatus.textContent = "error";
+  } finally {
+    redecodeInFlight = false;
+  }
+}
+
+methodSelect.addEventListener("change", (e) => {
+  tuning.method = e.target.value;
+  syncTuningControls();
+  scheduleRedecode();
+});
+
+volumeSlider.addEventListener("input", (e) => {
+  tuning.volume = volumeFromSlider(Number(e.target.value));
+  volumeLabel.textContent = tuning.volume.toFixed(2) + "×";
+  resetButton.disabled = false;
+  scheduleRedecode();
+});
+
+biasSlider.addEventListener("input", (e) => {
+  tuning.bias = biasFromSlider(Number(e.target.value));
+  biasLabel.textContent = (tuning.bias >= 0 ? "+" : "") + tuning.bias.toFixed(2);
+  resetButton.disabled = false;
+  scheduleRedecode();
+});
+
+thresholdSlider.addEventListener("input", (e) => {
+  tuning.threshold = thresholdFromSlider(Number(e.target.value));
+  thresholdLabel.textContent = Math.round(tuning.threshold * 100) + "%";
+  resetButton.disabled = false;
+  repaintCanvas();
+  scheduleRedecode();
+});
+
+polarityButton.addEventListener("click", () => {
+  tuning.polarity = tuning.polarity === "pos" ? "neg" : "pos";
+  syncTuningControls();
+  scheduleRedecode();
+});
+
+resetButton.addEventListener("click", () => {
+  tuning = { ...DEFAULT_TUNING };
+  syncTuningControls();
+  scheduleRedecode();
+});
+
+syncTuningControls();

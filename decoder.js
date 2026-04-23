@@ -1,348 +1,95 @@
-// ZX81/TS1000 tape decoder using amplitude-filtered zero-crossing detection.
+// ZX81/TS1000 tape decoder with swappable detection methods.
 //
 // ZX81 tape format encodes bits as bursts of carrier pulses (~3250 Hz):
-//   0-bit: ~4 carrier cycles (fewer pulses)
-//   1-bit: ~9 carrier cycles (more pulses)
-// At 44100 Hz, one carrier half-period is ~7 samples.
+//   0-bit: 4 carrier pulses (fewer)
+//   1-bit: 9 carrier pulses (more)
 //
-// This decoder uses zero-crossing detection with an amplitude filter
-// that requires the signal to reach 10% of local peak between crossings,
-// plus noise-interval absorption that combines sub-carrier-period intervals
-// (from e.g. clipped signal noise) with their neighbors. This is robust
-// against:
-//   - Asymmetric waveforms where one polarity doesn't reach fixed thresholds
-//   - Amplitude variations across the recording (no AGC needed)
-//   - Clipped/saturated signals with noise on the flat tops
-//   - Noise near zero crossings (filtered by amplitude requirement)
-//   - DC offset drift
+// Detection methods:
+//   "peak" (default): one-sided — counts only positive-going threshold
+//     crossings in the cleaner half of the signal. Ignores capacitor-
+//     discharge noise on the opposite half. Best for typical/clean tapes.
+//   "edge": zero-crossing — counts all sign changes (with amplitude
+//     filtering and noise-interval absorption). Better for degraded/weak
+//     signals where every transition counts.
+//
+// Pre-decode conditioning (both methods):
+//   volume     — gain multiplier applied before detection
+//   bias       — DC offset added after gain
+//   polarity   — "pos" or "neg" (flip signal before detection)
+//   threshold  — detection level as fraction of local peak (peak method)
 
 const fs = require("fs");
 const wav = require("node-wav");
 
-function processWavFile(filePath) {
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
+
+function processWavFile(filePath, options) {
+  const loaded = loadWav(filePath);
+  return decodeSamples(loaded.samples, loaded.sampleRate, options);
+}
+
+function loadWav(filePath) {
   const buffer = fs.readFileSync(filePath);
-  const decodedWav = wav.decode(buffer);
-  const sampleRate = decodedWav.sampleRate;
-  const rawSamples = decodedWav.channelData[0];
+  const decoded = wav.decode(buffer);
+  return {
+    samples: decoded.channelData[0],
+    sampleRate: decoded.sampleRate,
+  };
+}
+
+function decodeSamples(rawSamples, sampleRate, options) {
+  const opts = {
+    method: "peak",      // "peak" | "edge"
+    volume: 1.0,         // gain multiplier
+    bias: 0.0,           // DC offset (-1.0 .. +1.0 scale)
+    polarity: "pos",     // "pos" | "neg"
+    threshold: 0.5,      // peak method: detection level as fraction of local peak
+    ...(options || {}),
+  };
+
   console.log("samplerate:", sampleRate);
   console.log("total # of samples:", rawSamples.length);
+  console.log("method:", opts.method, "volume:", opts.volume, "bias:", opts.bias,
+              "polarity:", opts.polarity, "threshold:", opts.threshold);
 
-  // --- A. DC offset removal ---
-  // Subtract a rolling mean over a ~100ms window
-  const dcWindowSize = Math.floor(sampleRate * 0.1);
-  const samples = new Float32Array(rawSamples.length);
-  let windowSum = 0;
-  for (let i = 0; i < Math.min(dcWindowSize, rawSamples.length); i++) {
-    windowSum += rawSamples[i];
-  }
-  for (let i = 0; i < rawSamples.length; i++) {
-    const windowStart = Math.max(0, i - Math.floor(dcWindowSize / 2));
-    const windowEnd = Math.min(rawSamples.length, windowStart + dcWindowSize);
-    // Recompute mean for accuracy (incremental would accumulate drift)
-    if (i % 1000 === 0) {
-      windowSum = 0;
-      for (let j = windowStart; j < windowEnd; j++) {
-        windowSum += rawSamples[j];
-      }
-    }
-    const mean = windowSum / (windowEnd - windowStart);
-    samples[i] = rawSamples[i] - mean;
-  }
+  // DC offset removal (rolling mean)
+  const dcRemoved = removeDcOffset(rawSamples, sampleRate);
 
-  // --- F. Signal start detection ---
-  // Scan for sustained carrier signal (not just noise spikes).
-  // Require multiple consecutive windows above 25% peak amplitude.
-  const winSize = Math.floor(sampleRate * 0.01); // 10ms windows
+  // Apply conditioning: volume, bias, polarity
+  const conditioned = applyConditioning(dcRemoved, opts);
+
+  // Compute peak amplitude (after conditioning) and signal start
   let peakAmplitude = 0;
-  for (let i = 0; i < samples.length; i++) {
-    if (Math.abs(samples[i]) > peakAmplitude) peakAmplitude = Math.abs(samples[i]);
+  for (let i = 0; i < conditioned.length; i++) {
+    const a = Math.abs(conditioned[i]);
+    if (a > peakAmplitude) peakAmplitude = a;
   }
-  const signalThreshold = peakAmplitude * 0.25;
-  let signalStart = 0;
-  let consecutiveAbove = 0;
-  const requiredConsecutive = 3; // 30ms of sustained signal
-  for (let i = 0; i < samples.length - winSize; i += winSize) {
-    let maxInWin = 0;
-    for (let j = i; j < i + winSize; j++) {
-      if (Math.abs(samples[j]) > maxInWin) maxInWin = Math.abs(samples[j]);
-    }
-    if (maxInWin > signalThreshold) {
-      consecutiveAbove++;
-      if (consecutiveAbove >= requiredConsecutive) {
-        signalStart = i - (requiredConsecutive - 1) * winSize;
-        break;
-      }
-    } else {
-      consecutiveAbove = 0;
-    }
-  }
+
+  const signalStart = findSignalStart(conditioned, sampleRate, peakAmplitude);
   console.log("signal starts at sample:", signalStart,
     "(" + (signalStart / sampleRate).toFixed(2) + "s)");
   console.log("peak amplitude:", peakAmplitude.toFixed(3));
 
-  // --- B. Amplitude-filtered zero-crossing detection ---
-  // More robust than hysteresis for signals with asymmetric waveforms or
-  // declining amplitude. Counts all carrier cycles by detecting zero crossings
-  // where the signal has reached significant amplitude since the last crossing.
+  // Local peak cache for amplitude-aware detection
+  const peakCache = buildPeakCache(conditioned);
 
-  // Cache local peak amplitude in 500-sample windows for performance
-  const peakCacheStep = 100;
-  const peakCacheWindow = 250; // look ±250 samples
-  const peakCache = new Float32Array(
-    Math.ceil(samples.length / peakCacheStep)
-  );
-  for (let i = 0; i < peakCache.length; i++) {
-    const start = Math.max(0, i * peakCacheStep - peakCacheWindow);
-    const end = Math.min(
-      samples.length,
-      i * peakCacheStep + peakCacheStep + peakCacheWindow
-    );
-    let mx = 0;
-    for (let j = start; j < end; j++) {
-      if (Math.abs(samples[j]) > mx) mx = Math.abs(samples[j]);
-    }
-    peakCache[i] = mx;
+  // Detect transitions using the selected method
+  let result;
+  if (opts.method === "peak") {
+    result = decodePeakMethod(conditioned, signalStart, peakCache, opts);
+  } else {
+    result = decodeEdgeMethod(conditioned, signalStart, peakCache, opts);
   }
 
-  // Find zero crossings with amplitude filter
-  const minAmpFraction = 0.1; // require 10% of local peak between crossings
-  const crossings = [];
-  let lastSign = samples[signalStart] > 0 ? 1 : -1;
-  let maxSinceLast = 0;
+  // Build editor lines and statistics
+  const { runs, zeroBitRunLength, oneBitRunLength, silenceRunLength } = result;
+  const { linesForEdit } = buildLinesForEdit(runs, result.bitThreshold, silenceRunLength);
 
-  for (let i = signalStart + 1; i < samples.length; i++) {
-    if (Math.abs(samples[i]) > maxSinceLast) maxSinceLast = Math.abs(samples[i]);
-    const sign = samples[i] > 0 ? 1 : -1;
-    if (sign !== lastSign) {
-      const ci = Math.min(
-        Math.floor(i / peakCacheStep),
-        peakCache.length - 1
-      );
-      if (maxSinceLast > peakCache[ci] * minAmpFraction) {
-        crossings.push(i);
-        maxSinceLast = 0;
-      }
-      lastSign = sign;
-    }
-  }
-
-  console.log("total zero crossings:", crossings.length);
-
-  // --- C. Carrier interval measurement ---
-  const rawIntervals = [];
-  for (let i = 1; i < crossings.length; i++) {
-    rawIntervals.push({
-      index: crossings[i - 1],
-      length: crossings[i] - crossings[i - 1],
-    });
-  }
-
-  // --- C2. Noise interval absorption ---
-  // When the tape signal is clipped/saturated, noise on the flat tops can
-  // create spurious sub-carrier-period zero crossings (intervals of 1-2
-  // samples). These would break real carrier bursts into fragments. Absorb
-  // these tiny intervals into their neighbors to reconstruct the original
-  // burst structure.
-  const minCarrierInterval = 3;
-  const intervals = [];
-  let ii = 0;
-  while (ii < rawIntervals.length) {
-    const cur = rawIntervals[ii];
-    if (cur.length < minCarrierInterval && ii + 1 < rawIntervals.length && intervals.length > 0) {
-      // Absorb this tiny interval + the next one into the previous output
-      // interval (combining prev + cur + next into one longer interval).
-      const next = rawIntervals[ii + 1];
-      const prev = intervals[intervals.length - 1];
-      prev.length = (next.index + next.length) - prev.index;
-      ii += 2;
-    } else if (cur.length < minCarrierInterval && intervals.length > 0) {
-      // Trailing tiny interval - absorb into previous only.
-      const prev = intervals[intervals.length - 1];
-      prev.length = (cur.index + cur.length) - prev.index;
-      ii++;
-    } else {
-      intervals.push({ index: cur.index, length: cur.length });
-      ii++;
-    }
-  }
-
-  // --- E. Adaptive threshold for carrier vs gap intervals ---
-  // Build histogram of interval lengths to find the carrier peak
-  const hist = new Array(80).fill(0);
-  const calibrationCount = Math.min(20000, intervals.length);
-  for (let i = 0; i < calibrationCount; i++) {
-    const len = intervals[i].length;
-    if (len >= 3 && len < 80) hist[len]++;
-  }
-
-  // Find the carrier peak (short intervals, typically 4-10 range)
-  let carrierPeak = 4;
-  for (let i = 4; i <= 12; i++) {
-    if (hist[i] > hist[carrierPeak]) carrierPeak = i;
-  }
-
-  // Find carrierMax: the valley between carrier intervals and gap intervals
-  // Look for the first minimum after the carrier peak
-  let carrierMax = carrierPeak + 3; // fallback
-  let minCount = Infinity;
-  for (let i = carrierPeak + 1; i <= carrierPeak + 8; i++) {
-    if (i < 80 && hist[i] < minCount) {
-      minCount = hist[i];
-      carrierMax = i;
-    }
-  }
-
-  console.log("carrier peak at:", carrierPeak, "samples");
-  console.log("carrier max threshold:", carrierMax, "samples");
-
-  // --- G. Burst grouping by carrier intervals ---
-  // ZX81 tape format: each bit is a burst of carrier cycles separated by gaps.
-  //   0-bit: ~4 carrier cycles (fewer pulses)
-  //   1-bit: ~9 carrier cycles (more pulses)
-  //
-  // Group consecutive carrier-frequency intervals into bursts,
-  // then classify by cycle count.
-
-  let bursts = [];
-  let burstStart = -1;
-  let burstSampleStart = 0;
-  let burstIntervals = 0;
-  let burstSampleEnd = 0;
-
-  for (let j = 0; j < intervals.length; j++) {
-    const iv = intervals[j];
-    const isCarrier = iv.length >= 3 && iv.length <= carrierMax;
-
-    if (isCarrier) {
-      if (burstStart === -1) {
-        burstStart = j;
-        burstSampleStart = iv.index;
-        burstIntervals = 1;
-      } else {
-        burstIntervals++;
-      }
-      burstSampleEnd = iv.index + iv.length;
-    } else {
-      if (burstStart !== -1 && burstIntervals >= 3) {
-        const cycles = Math.round((burstIntervals + 1) / 2);
-        bursts.push({
-          index: burstSampleStart,
-          runLength: burstSampleEnd - burstSampleStart,
-          halfPeriodCount: cycles, // store cycle count for compatibility
-        });
-      }
-      burstStart = -1;
-      burstIntervals = 0;
-
-      // Track non-data gaps for display
-      if (iv.length > carrierMax * 4) {
-        bursts.push({
-          index: iv.index,
-          runLength: iv.length,
-          halfPeriodCount: 0,
-          isSync: true,
-        });
-      }
-    }
-  }
-  if (burstStart !== -1 && burstIntervals >= 3) {
-    const cycles = Math.round((burstIntervals + 1) / 2);
-    bursts.push({
-      index: burstSampleStart,
-      runLength: burstSampleEnd - burstSampleStart,
-      halfPeriodCount: cycles,
-    });
-  }
-
-  // Find the threshold between 0-bit cycle counts and 1-bit cycle counts
-  const burstHist = new Array(30).fill(0);
-  for (const b of bursts) {
-    if (!b.isSync && b.halfPeriodCount >= 2 && b.halfPeriodCount < 30) {
-      burstHist[b.halfPeriodCount]++;
-    }
-  }
-
-  console.log("burst cycle count histogram:");
-  for (let k = 2; k < 20; k++) {
-    if (burstHist[k] > 0)
-      console.log("  " + k + " cycles: " + burstHist[k]);
-  }
-
-  // Find two peaks: 0-bit peak (fewer cycles) and 1-bit peak (more cycles)
-  let peak0 = 3, peak1 = 8;
-  for (let k = 3; k <= 7; k++) {
-    if (burstHist[k] > burstHist[peak0]) peak0 = k;
-  }
-  for (let k = 7; k <= 15; k++) {
-    if (burstHist[k] > burstHist[peak1]) peak1 = k;
-  }
-
-  let bitThreshold = Math.floor((peak0 + peak1) / 2) + 0.5;
-  // Find actual valley
-  let minVal = Infinity;
-  for (let k = peak0 + 1; k < peak1; k++) {
-    if (burstHist[k] < minVal) {
-      minVal = burstHist[k];
-      bitThreshold = k + 0.5;
-    }
-  }
-
-  console.log(
-    "bit threshold:",
-    bitThreshold,
-    "cycles (0-bit peak=" + peak0 + ", 1-bit peak=" + peak1 + ")"
-  );
-
-  const runs = bursts;
-
-  // Approximate run lengths for waveform display
-  const carrierPeriod = carrierPeak * 2;
-  const zeroBitRunLength = Math.round(carrierPeriod * peak0);
-  const oneBitRunLength = Math.round(carrierPeriod * peak1);
-  const silenceRunLength = Math.round(carrierMax * 4);
-
-  console.log("zero bit run length:", zeroBitRunLength);
-  console.log("one bit run length:", oneBitRunLength);
-
-  // Build editor lines
-  // ZX81 format: fewer cycles = 0-bit, more cycles = 1-bit
-  const linesForEdit = runs.map((run) => {
-    let bitAsString;
-    if (run.isSync) {
-      bitAsString = "-";
-    } else if (run.halfPeriodCount < 2) {
-      bitAsString = "-";
-    } else if (run.halfPeriodCount <= bitThreshold) {
-      bitAsString = "0";
-    } else {
-      bitAsString = "1";
-    }
-    return bitAsString + "\t" + run.index + ":" + run.runLength;
-  });
-
-  // Mark suspicious gaps
-  const firstBitIdx = linesForEdit.findIndex(
-    (val) => val[0] === "0" || val[0] === "1"
-  );
-  let scanIdx = linesForEdit.findLastIndex(
-    (val) => val[0] === "0" || val[0] === "1"
-  );
-  while (scanIdx > firstBitIdx) {
-    const gapBetween =
-      runs[scanIdx].index -
-      (runs[scanIdx - 1].index + runs[scanIdx - 1].runLength);
-    if (gapBetween > silenceRunLength * 4) {
-      linesForEdit[scanIdx - 1] =
-        linesForEdit[scanIdx - 1] + " # suspicious loss of signal?";
-    }
-    scanIdx--;
-  }
-
-  // Stats
   const ones = linesForEdit.filter((l) => l[0] === "1").length;
   const zeros = linesForEdit.filter((l) => l[0] === "0").length;
-  const unknowns = linesForEdit.filter((l) => l[0] === "?").length;
-  console.log("decoded:", ones, "ones,", zeros, "zeros,", unknowns, "unknowns");
+  console.log("decoded:", ones, "ones,", zeros, "zeros");
   console.log("total bits:", ones + zeros);
   console.log("total bytes:", Math.floor((ones + zeros) / 8));
 
@@ -354,7 +101,403 @@ function processWavFile(filePath) {
     zeroBitRunLength: zeroBitRunLength,
     oneBitRunLength: oneBitRunLength,
     silenceRunLength: silenceRunLength,
+    // Reflect the options actually used (for UI state):
+    options: opts,
+    peakAmplitude: peakAmplitude,
   };
 }
 
-module.exports = { processWavFile };
+// ---------------------------------------------------------------------------
+// Pre-processing
+// ---------------------------------------------------------------------------
+
+function removeDcOffset(rawSamples, sampleRate) {
+  // 100ms rolling mean subtraction; mean recomputed every 1000 samples
+  // for accuracy (incremental would accumulate drift).
+  const dcWindowSize = Math.floor(sampleRate * 0.1);
+  const out = new Float32Array(rawSamples.length);
+  let windowSum = 0;
+  for (let i = 0; i < Math.min(dcWindowSize, rawSamples.length); i++) {
+    windowSum += rawSamples[i];
+  }
+  for (let i = 0; i < rawSamples.length; i++) {
+    const windowStart = Math.max(0, i - Math.floor(dcWindowSize / 2));
+    const windowEnd = Math.min(rawSamples.length, windowStart + dcWindowSize);
+    if (i % 1000 === 0) {
+      windowSum = 0;
+      for (let j = windowStart; j < windowEnd; j++) windowSum += rawSamples[j];
+    }
+    const mean = windowSum / (windowEnd - windowStart);
+    out[i] = rawSamples[i] - mean;
+  }
+  return out;
+}
+
+function applyConditioning(samples, opts) {
+  // Apply volume (gain), bias (DC shift), and polarity (sign flip) in that order.
+  const v = opts.volume;
+  const b = opts.bias;
+  const flip = opts.polarity === "neg" ? -1 : 1;
+  if (v === 1.0 && b === 0.0 && flip === 1) return samples; // no-op
+  const out = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    out[i] = flip * (samples[i] * v + b);
+  }
+  return out;
+}
+
+function findSignalStart(samples, sampleRate, peakAmplitude) {
+  // Require 30ms of sustained signal above 25% peak to avoid triggering on noise.
+  const winSize = Math.floor(sampleRate * 0.01);
+  const threshold = peakAmplitude * 0.25;
+  const required = 3;
+  let consecutive = 0;
+  for (let i = 0; i < samples.length - winSize; i += winSize) {
+    let maxInWin = 0;
+    for (let j = i; j < i + winSize; j++) {
+      const a = Math.abs(samples[j]);
+      if (a > maxInWin) maxInWin = a;
+    }
+    if (maxInWin > threshold) {
+      consecutive++;
+      if (consecutive >= required) return i - (required - 1) * winSize;
+    } else {
+      consecutive = 0;
+    }
+  }
+  return 0;
+}
+
+function buildPeakCache(samples) {
+  // Cache local peak amplitude in ~11ms windows for performance.
+  const step = 100;
+  const halfWindow = 250;
+  const cache = new Float32Array(Math.ceil(samples.length / step));
+  for (let i = 0; i < cache.length; i++) {
+    const start = Math.max(0, i * step - halfWindow);
+    const end = Math.min(samples.length, i * step + step + halfWindow);
+    let mx = 0;
+    for (let j = start; j < end; j++) {
+      const a = Math.abs(samples[j]);
+      if (a > mx) mx = a;
+    }
+    cache[i] = mx;
+  }
+  return cache;
+}
+
+function localPeakAt(peakCache, sampleIdx) {
+  const step = 100;
+  const ci = Math.min(Math.floor(sampleIdx / step), peakCache.length - 1);
+  return peakCache[ci];
+}
+
+// ---------------------------------------------------------------------------
+// Method: Peak (one-sided positive threshold crossing)
+// ---------------------------------------------------------------------------
+
+function decodePeakMethod(samples, signalStart, peakCache, opts) {
+  const thresholdFrac = opts.threshold;
+  const hysteresisFrac = Math.min(thresholdFrac * 0.3, 0.15);
+
+  // Find positive-going threshold crossings with Schmitt-trigger hysteresis.
+  // Each ZX81 carrier pulse produces exactly one such crossing.
+  const crossings = [];
+  let state = false;
+  for (let i = signalStart; i < samples.length; i++) {
+    const localPeak = Math.max(localPeakAt(peakCache, i), 0.01);
+    const hi = localPeak * thresholdFrac;
+    const lo = localPeak * hysteresisFrac;
+    if (!state && samples[i] > hi) {
+      crossings.push(i);
+      state = true;
+    } else if (state && samples[i] < lo) {
+      state = false;
+    }
+  }
+  console.log("total peak crossings:", crossings.length);
+
+  // Intervals between successive crossings
+  const intervals = [];
+  for (let i = 1; i < crossings.length; i++) {
+    intervals.push({
+      index: crossings[i - 1],
+      length: crossings[i] - crossings[i - 1],
+    });
+  }
+
+  // Histogram: find the carrier period (should be ~14 samples at 44.1kHz)
+  const hist = new Array(120).fill(0);
+  const calib = Math.min(20000, intervals.length);
+  for (let i = 0; i < calib; i++) {
+    const l = intervals[i].length;
+    if (l >= 5 && l < 120) hist[l]++;
+  }
+  let carrierPeriod = 14;
+  for (let i = 8; i <= 20; i++) if (hist[i] > hist[carrierPeriod]) carrierPeriod = i;
+
+  // Max carrier interval: valley after the peak
+  let carrierMax = carrierPeriod + 4;
+  let minCount = Infinity;
+  for (let i = carrierPeriod + 1; i <= carrierPeriod + 15; i++) {
+    if (i < 120 && hist[i] < minCount) {
+      minCount = hist[i];
+      carrierMax = i;
+    }
+  }
+  const carrierMin = Math.max(5, Math.floor(carrierPeriod * 0.5));
+
+  console.log("carrier period:", carrierPeriod, "samples (range " + carrierMin + "-" + carrierMax + ")");
+
+  // Group consecutive carrier-period intervals into bursts.
+  // A burst with N intervals = N+1 pulses.
+  const bursts = [];
+  let bStart = -1, bSampStart = 0, bInt = 0, bSampEnd = 0;
+  for (let j = 0; j < intervals.length; j++) {
+    const iv = intervals[j];
+    const isCarrier = iv.length >= carrierMin && iv.length <= carrierMax;
+    if (isCarrier) {
+      if (bStart === -1) {
+        bStart = j; bSampStart = iv.index; bInt = 1;
+      } else {
+        bInt++;
+      }
+      bSampEnd = iv.index + iv.length;
+    } else {
+      if (bStart !== -1 && bInt >= 2) {
+        bursts.push({
+          index: bSampStart,
+          runLength: bSampEnd - bSampStart,
+          halfPeriodCount: bInt + 1,   // interpreted as pulses for peak method
+        });
+      }
+      bStart = -1; bInt = 0;
+      if (iv.length > carrierMax * 4) {
+        bursts.push({
+          index: iv.index,
+          runLength: iv.length,
+          halfPeriodCount: 0,
+          isSync: true,
+        });
+      }
+    }
+  }
+  if (bStart !== -1 && bInt >= 2) {
+    bursts.push({
+      index: bSampStart,
+      runLength: bSampEnd - bSampStart,
+      halfPeriodCount: bInt + 1,
+    });
+  }
+
+  // Find 0-bit and 1-bit peaks in burst pulse histogram
+  const burstHist = new Array(30).fill(0);
+  for (const b of bursts) {
+    if (!b.isSync && b.halfPeriodCount >= 2 && b.halfPeriodCount < 30) {
+      burstHist[b.halfPeriodCount]++;
+    }
+  }
+
+  console.log("burst pulse histogram:");
+  for (let k = 2; k < 20; k++) {
+    if (burstHist[k] > 0) console.log("  " + k + " pulses: " + burstHist[k]);
+  }
+
+  let peak0 = 4, peak1 = 9;
+  for (let k = 3; k <= 6; k++) if (burstHist[k] > burstHist[peak0]) peak0 = k;
+  for (let k = 7; k <= 12; k++) if (burstHist[k] > burstHist[peak1]) peak1 = k;
+
+  let bitThreshold = Math.floor((peak0 + peak1) / 2) + 0.5;
+  let minVal = Infinity;
+  for (let k = peak0 + 1; k < peak1; k++) {
+    if (burstHist[k] < minVal) { minVal = burstHist[k]; bitThreshold = k + 0.5; }
+  }
+
+  console.log("bit threshold:", bitThreshold, "pulses (0-bit peak=" + peak0 + ", 1-bit peak=" + peak1 + ")");
+
+  return {
+    runs: bursts,
+    bitThreshold,
+    zeroBitRunLength: Math.round(carrierPeriod * peak0),
+    oneBitRunLength: Math.round(carrierPeriod * peak1),
+    silenceRunLength: Math.round(carrierMax * 4),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Method: Edge (zero-crossing with amplitude filter and noise absorption)
+// ---------------------------------------------------------------------------
+
+function decodeEdgeMethod(samples, signalStart, peakCache, opts) {
+  // Amplitude-filtered zero-crossing detection.
+  const minAmpFraction = 0.1;
+  const crossings = [];
+  let lastSign = samples[signalStart] > 0 ? 1 : -1;
+  let maxSinceLast = 0;
+  for (let i = signalStart + 1; i < samples.length; i++) {
+    const a = Math.abs(samples[i]);
+    if (a > maxSinceLast) maxSinceLast = a;
+    const sign = samples[i] > 0 ? 1 : -1;
+    if (sign !== lastSign) {
+      const localPeak = localPeakAt(peakCache, i);
+      if (maxSinceLast > localPeak * minAmpFraction) {
+        crossings.push(i);
+        maxSinceLast = 0;
+      }
+      lastSign = sign;
+    }
+  }
+  console.log("total zero crossings:", crossings.length);
+
+  // Raw intervals
+  const rawIntervals = [];
+  for (let i = 1; i < crossings.length; i++) {
+    rawIntervals.push({
+      index: crossings[i - 1],
+      length: crossings[i] - crossings[i - 1],
+    });
+  }
+
+  // Noise interval absorption: combine sub-3-sample intervals with neighbors
+  // (handles clipped signals with noise on the flat tops).
+  const minCarrierInterval = 3;
+  const intervals = [];
+  let ii = 0;
+  while (ii < rawIntervals.length) {
+    const cur = rawIntervals[ii];
+    if (cur.length < minCarrierInterval && ii + 1 < rawIntervals.length && intervals.length > 0) {
+      const next = rawIntervals[ii + 1];
+      const prev = intervals[intervals.length - 1];
+      prev.length = (next.index + next.length) - prev.index;
+      ii += 2;
+    } else if (cur.length < minCarrierInterval && intervals.length > 0) {
+      const prev = intervals[intervals.length - 1];
+      prev.length = (cur.index + cur.length) - prev.index;
+      ii++;
+    } else {
+      intervals.push({ index: cur.index, length: cur.length });
+      ii++;
+    }
+  }
+
+  // Interval histogram and carrier threshold
+  const hist = new Array(80).fill(0);
+  const calib = Math.min(20000, intervals.length);
+  for (let i = 0; i < calib; i++) {
+    const l = intervals[i].length;
+    if (l >= 3 && l < 80) hist[l]++;
+  }
+  let carrierPeak = 4;
+  for (let i = 4; i <= 12; i++) if (hist[i] > hist[carrierPeak]) carrierPeak = i;
+  let carrierMax = carrierPeak + 3;
+  let minCount = Infinity;
+  for (let i = carrierPeak + 1; i <= carrierPeak + 8; i++) {
+    if (i < 80 && hist[i] < minCount) { minCount = hist[i]; carrierMax = i; }
+  }
+  console.log("carrier peak at:", carrierPeak, "samples; max threshold:", carrierMax);
+
+  // Burst grouping
+  const bursts = [];
+  let bStart = -1, bSampStart = 0, bInt = 0, bSampEnd = 0;
+  for (let j = 0; j < intervals.length; j++) {
+    const iv = intervals[j];
+    const isCarrier = iv.length >= 3 && iv.length <= carrierMax;
+    if (isCarrier) {
+      if (bStart === -1) { bStart = j; bSampStart = iv.index; bInt = 1; }
+      else bInt++;
+      bSampEnd = iv.index + iv.length;
+    } else {
+      if (bStart !== -1 && bInt >= 3) {
+        const cycles = Math.round((bInt + 1) / 2);
+        bursts.push({
+          index: bSampStart,
+          runLength: bSampEnd - bSampStart,
+          halfPeriodCount: cycles,
+        });
+      }
+      bStart = -1; bInt = 0;
+      if (iv.length > carrierMax * 4) {
+        bursts.push({
+          index: iv.index,
+          runLength: iv.length,
+          halfPeriodCount: 0,
+          isSync: true,
+        });
+      }
+    }
+  }
+  if (bStart !== -1 && bInt >= 3) {
+    const cycles = Math.round((bInt + 1) / 2);
+    bursts.push({
+      index: bSampStart,
+      runLength: bSampEnd - bSampStart,
+      halfPeriodCount: cycles,
+    });
+  }
+
+  // Burst cycle histogram → 0-bit vs 1-bit peaks
+  const burstHist = new Array(30).fill(0);
+  for (const b of bursts) {
+    if (!b.isSync && b.halfPeriodCount >= 2 && b.halfPeriodCount < 30) {
+      burstHist[b.halfPeriodCount]++;
+    }
+  }
+  console.log("burst cycle histogram:");
+  for (let k = 2; k < 20; k++) {
+    if (burstHist[k] > 0) console.log("  " + k + " cycles: " + burstHist[k]);
+  }
+
+  let peak0 = 3, peak1 = 8;
+  for (let k = 3; k <= 7; k++) if (burstHist[k] > burstHist[peak0]) peak0 = k;
+  for (let k = 7; k <= 15; k++) if (burstHist[k] > burstHist[peak1]) peak1 = k;
+  let bitThreshold = Math.floor((peak0 + peak1) / 2) + 0.5;
+  let minVal = Infinity;
+  for (let k = peak0 + 1; k < peak1; k++) {
+    if (burstHist[k] < minVal) { minVal = burstHist[k]; bitThreshold = k + 0.5; }
+  }
+  console.log("bit threshold:", bitThreshold, "cycles (0-bit peak=" + peak0 + ", 1-bit peak=" + peak1 + ")");
+
+  const carrierPeriod = carrierPeak * 2;
+  return {
+    runs: bursts,
+    bitThreshold,
+    zeroBitRunLength: Math.round(carrierPeriod * peak0),
+    oneBitRunLength: Math.round(carrierPeriod * peak1),
+    silenceRunLength: Math.round(carrierMax * 4),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Line formatting
+// ---------------------------------------------------------------------------
+
+function buildLinesForEdit(runs, bitThreshold, silenceRunLength) {
+  const linesForEdit = runs.map((run) => {
+    let bit;
+    if (run.isSync || run.halfPeriodCount < 2) bit = "-";
+    else if (run.halfPeriodCount <= bitThreshold) bit = "0";
+    else bit = "1";
+    return bit + "\t" + run.index + ":" + run.runLength;
+  });
+
+  // Mark suspicious long gaps between data bits
+  const firstBitIdx = linesForEdit.findIndex((v) => v[0] === "0" || v[0] === "1");
+  let scanIdx = linesForEdit.findLastIndex((v) => v[0] === "0" || v[0] === "1");
+  while (scanIdx > firstBitIdx) {
+    const gapBetween =
+      runs[scanIdx].index -
+      (runs[scanIdx - 1].index + runs[scanIdx - 1].runLength);
+    if (gapBetween > silenceRunLength * 4) {
+      linesForEdit[scanIdx - 1] =
+        linesForEdit[scanIdx - 1] + " # suspicious loss of signal?";
+    }
+    scanIdx--;
+  }
+  return { linesForEdit };
+}
+
+module.exports = {
+  processWavFile,
+  loadWav,
+  decodeSamples,
+};

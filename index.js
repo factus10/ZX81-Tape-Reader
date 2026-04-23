@@ -163,10 +163,29 @@ function createWindow() {
 
 // --- IPC Handlers ---
 
-ipcMain.handle("process-wav-file", (_event, filePath) => {
+// Cache of loaded WAV samples, keyed by resolved file path. Avoids re-reading
+// the WAV from disk when the user adjusts tuning sliders and we re-decode.
+const sampleCache = new Map();
+
+ipcMain.handle("process-wav-file", (_event, filePath, options) => {
   const decoder = require("./decoder");
   const resolvedPath = path.resolve(filePath);
-  return decoder.processWavFile(resolvedPath);
+  const loaded = decoder.loadWav(resolvedPath);
+  // Keep cache small: only hold the most-recently-opened file's samples.
+  sampleCache.clear();
+  sampleCache.set(resolvedPath, loaded);
+  return decoder.decodeSamples(loaded.samples, loaded.sampleRate, options);
+});
+
+ipcMain.handle("redecode-wav-file", (_event, filePath, options) => {
+  const decoder = require("./decoder");
+  const resolvedPath = path.resolve(filePath);
+  let loaded = sampleCache.get(resolvedPath);
+  if (!loaded) {
+    loaded = decoder.loadWav(resolvedPath);
+    sampleCache.set(resolvedPath, loaded);
+  }
+  return decoder.decodeSamples(loaded.samples, loaded.sampleRate, options);
 });
 
 ipcMain.handle("encode-to-tzx", (_event, rawData) => {
