@@ -6,10 +6,13 @@
 // At 44100 Hz, one carrier half-period is ~7 samples.
 //
 // This decoder uses zero-crossing detection with an amplitude filter
-// that requires the signal to reach 10% of local peak between crossings.
-// This is robust against:
+// that requires the signal to reach 10% of local peak between crossings,
+// plus noise-interval absorption that combines sub-carrier-period intervals
+// (from e.g. clipped signal noise) with their neighbors. This is robust
+// against:
 //   - Asymmetric waveforms where one polarity doesn't reach fixed thresholds
 //   - Amplitude variations across the recording (no AGC needed)
+//   - Clipped/saturated signals with noise on the flat tops
 //   - Noise near zero crossings (filtered by amplitude requirement)
 //   - DC offset drift
 
@@ -126,12 +129,41 @@ function processWavFile(filePath) {
   console.log("total zero crossings:", crossings.length);
 
   // --- C. Carrier interval measurement ---
-  const intervals = [];
+  const rawIntervals = [];
   for (let i = 1; i < crossings.length; i++) {
-    intervals.push({
+    rawIntervals.push({
       index: crossings[i - 1],
       length: crossings[i] - crossings[i - 1],
     });
+  }
+
+  // --- C2. Noise interval absorption ---
+  // When the tape signal is clipped/saturated, noise on the flat tops can
+  // create spurious sub-carrier-period zero crossings (intervals of 1-2
+  // samples). These would break real carrier bursts into fragments. Absorb
+  // these tiny intervals into their neighbors to reconstruct the original
+  // burst structure.
+  const minCarrierInterval = 3;
+  const intervals = [];
+  let ii = 0;
+  while (ii < rawIntervals.length) {
+    const cur = rawIntervals[ii];
+    if (cur.length < minCarrierInterval && ii + 1 < rawIntervals.length && intervals.length > 0) {
+      // Absorb this tiny interval + the next one into the previous output
+      // interval (combining prev + cur + next into one longer interval).
+      const next = rawIntervals[ii + 1];
+      const prev = intervals[intervals.length - 1];
+      prev.length = (next.index + next.length) - prev.index;
+      ii += 2;
+    } else if (cur.length < minCarrierInterval && intervals.length > 0) {
+      // Trailing tiny interval - absorb into previous only.
+      const prev = intervals[intervals.length - 1];
+      prev.length = (cur.index + cur.length) - prev.index;
+      ii++;
+    } else {
+      intervals.push({ index: cur.index, length: cur.length });
+      ii++;
+    }
   }
 
   // --- E. Adaptive threshold for carrier vs gap intervals ---
