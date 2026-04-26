@@ -1,6 +1,6 @@
 {
   "name": "zx81-dat-tape-reader",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Decode ZX81/TS1000 tape recordings from WAV files",
   "main": "index.js",
   "scripts": {
